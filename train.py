@@ -5,14 +5,13 @@ import time
 import pandas as pd
 import torch
 import torch.optim as optim
-from cityscapesscripts.helpers.labels import trainId2label
 from thop import profile, clever_format
 from torch import nn
 from torch.utils.data import DataLoader
 from torchvision.transforms import ToPILImage
 from tqdm import tqdm
 
-from dataset import Cityscapes, palette
+from dataset import Railsem, palette
 from model import FastSCNN
 
 
@@ -31,6 +30,12 @@ def train_val(net, data_loader, train_optimizer):
             prediction = torch.argmax(out, dim=1)
             torch.cuda.synchronize()
             end_time = time.time()
+            
+            #-------------START ADDED CODE-------------
+            target = target.unsqueeze(1)
+            target = torch.argmax(target, dim=1)
+            #--------------END ADDED CODE--------------
+            
             loss = loss_criterion(out, target)
 
             if is_train:
@@ -45,13 +50,13 @@ def train_val(net, data_loader, train_optimizer):
 
             if not is_train and epoch % save_step == 0:
                 # revert train id to regular id
-                for key in trainId2label.keys():
-                    prediction[prediction == key] = trainId2label[key].id
+                # for key in trainId2label.keys():
+                #     prediction[prediction == key] = trainId2label[key].id
                 # save pred images
                 for pred_tensor, pred_name in zip(prediction, name):
                     pred_img = ToPILImage()(pred_tensor.unsqueeze(dim=0).byte().cpu())
                     pred_img.putpalette(palette)
-                    pred_img.save('results/{}'.format(pred_name.replace('leftImg8bit', 'color')))
+                    pred_img.convert('RGB').save('results/{}'.format(pred_name.replace('raw_image', 'color')))
 
             data_bar.set_description('{} Epoch: [{}/{}] Loss: {:.4f} mPA: {:.2f}% FPS: {:.0f}'
                                      .format('Train' if is_train else 'Val', epoch, epochs, total_loss / total_num,
@@ -62,13 +67,12 @@ def train_val(net, data_loader, train_optimizer):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Train Fast-SCNN')
-    parser.add_argument('--data_path', default='/home/data/cityscapes', type=str,
-                        help='Data path for cityscapes dataset')
+    parser.add_argument('--data_path', default='datasets/railsem19-embedding', type=str, help='Data path for railsem dataset')
     parser.add_argument('--crop_h', default=1024, type=int, help='Crop height for training images')
-    parser.add_argument('--crop_w', default=2048, type=int, help='Crop width for training images')
-    parser.add_argument('--batch_size', default=12, type=int, help='Number of data for each batch to train')
+    parser.add_argument('--crop_w', default=1920, type=int, help='Crop width for training images')
+    parser.add_argument('--batch_size', default=50, type=int, help='Number of data for each batch to train')
     parser.add_argument('--save_step', default=5, type=int, help='Number of steps to save predicted results')
-    parser.add_argument('--epochs', default=100, type=int, help='Number of sweeps over the dataset to train')
+    parser.add_argument('--epochs', default=30, type=int, help='Number of sweeps over the dataset to train')
 
     # args parse
     args = parser.parse_args()
@@ -78,18 +82,19 @@ if __name__ == '__main__':
         os.mkdir('results')
 
     # dataset, model setup and optimizer config
-    train_data = Cityscapes(root=data_path, split='train', crop_size=(crop_h, crop_w))
-    val_data = Cityscapes(root=data_path, split='val')
+    train_data = Railsem(root=data_path, split='train')
+    val_data = Railsem(root=data_path, split='val')
     train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True, num_workers=4)
     val_loader = DataLoader(val_data, batch_size=batch_size, shuffle=False, num_workers=4)
-    model = FastSCNN(in_channels=3, num_classes=19).cuda()
-    optimizer = optim.Adam(model.parameters(), lr=1e-3)
+    model = FastSCNN(in_channels=3, num_classes=2).cuda()
+    optimizer = optim.Adam(model.parameters(), lr=1e-5)
 
     # model profile and loss definition
     flops, params = profile(model, inputs=(torch.randn(1, 3, crop_h, crop_w).cuda(),))
     flops, params = clever_format([flops, params])
     print('# Model Params: {} FLOPs: {}'.format(params, flops))
-    loss_criterion = nn.CrossEntropyLoss(ignore_index=255)
+    loss_criterion = nn.CrossEntropyLoss(ignore_index=-1)
+    # loss_criterion = nn.BCEWithLogitsLoss()
 
     # training loop
     results = {'train_loss': [], 'val_loss': [], 'train_mPA': [], 'val_mPA': []}
@@ -106,4 +111,4 @@ if __name__ == '__main__':
         data_frame.to_csv('{}_{}_statistics.csv'.format(crop_h, crop_w), index_label='epoch')
         if val_mPA > best_mPA:
             best_mPA = val_mPA
-            torch.save(model.state_dict(), '{}_{}_model.pth'.format(crop_h, crop_w))
+            torch.save(model.state_dict(), 'railsem_model.pth')
